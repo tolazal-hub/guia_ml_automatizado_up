@@ -1,0 +1,4 @@
+.validation_packages/
+.tmp_guia/
+__pycache__/
+.ipynb_checkpoints/
