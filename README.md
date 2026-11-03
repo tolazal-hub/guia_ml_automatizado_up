@@ -1,46 +1,46 @@
-# Guía PC2 de machine learning
+# Guía PC2 de regresión y series en Google Colab
 
-Abre [`guia_pc2.ipynb`](guia_pc2.ipynb) en Google Colab con **Archivo → Subir notebook**.
-Empieza por **Uso rápido en tu PC2**, al inicio del notebook: indica qué cargar,
-qué configuración editar, cómo seguir cada recorrido y qué archivos entregar.
-Para usar la guía en Colab no necesitas instalar Python ni ejecutar pruebas en tu PC.
+Abre [guia_pc2.ipynb](guia_pc2.ipynb) en Colab y sube tu CSV/Excel al panel Archivos.
+El recorrido está pensado para organizar un examen de **1 h 50 min**; los tiempos de entrenamiento dependen de tu base.
 
-1. Ejecuta la instalación y carga tu CSV o Excel.
-2. Configura `TIPO_PROBLEMA`, `TARGET`, columnas y preparación.
-3. Revisa calidad, aplica tus limpiezas y realiza el EDA; después divide para modelar.
-4. Compara modelos en validación, escribe tu elección y evalúa prueba.
-5. Carga una segunda base al final para predecir y exportar el resultado.
+1. Ejecuta la instalación y completa archivo, tipo de problema, target y exclusiones.
+2. Revisa calidad, escribe solo tus correcciones y realiza el EDA.
+3. Sigue **regresión (sección 4)** o **series (sección 5)**. El otro recorrido se omite.
+4. Compara, elige con validación y evalúa prueba (sección 6).
+5. Predice y exporta si lo pide el enunciado (sección 7). Descarga los CSV antes de cerrar Colab.
 
-La guía cubre clasificación binaria y multiclase, regresión y una serie temporal regular.
-Cada transformación crea otra variable. Las búsquedas de hiperparámetros, importancia y SHAP
-están desactivadas inicialmente. El notebook se entrega sin datos propios ni resultados precalculados.
+No necesitas instalar Python ni ejecutar verificadores locales para usar el notebook en tu PC2.
 
-Las explicaciones se basan en los notebooks de [`referencias/`](referencias/).
+## Modelos y preparación
 
-El recorrido temporal incorpora las mejoras de `PD_Solucion_Regresion_Series.ipynb`:
-calendario ampliado y feriados declarados, reservas por cantidad de periodos, línea base
-estacional y errores por día de semana y paso del horizonte. Las opciones nuevas empiezan
-desactivadas; se explican junto a la configuración temporal.
+- **Regresión:** promedio, lineal, árbol sin límite, árbol podado, Random Forest, XGBoost y LightGBM; una sección visible por modelo. División 60/20/20. El Pipeline aprende mediana, moda, escalado y categorías con entrenamiento.
+- **Series:** persistencia, Random Forest y XGBoost; calendario y rezagos anteriores, media móvil desplazada y pronóstico recursivo. Validación y prueba tienen HORIZONTE periodos cada una. Se rechazan huecos y fechas duplicadas.
+- **Selección:** MODELO_ELEGIDO="auto" usa RMSE en regresión y MAE recursivo en series. Puedes escribir otro nombre de la tabla antes de evaluar prueba.
+- RF/boosting usan 100 árboles inicialmente. Los hiperparámetros están escritos junto al modelo; no necesitas configurar una lista extensa.
 
-Para cantidades diarias, puedes activar `VENTANA_MEDIA_EDA=7`,
-`AGREGACION_MENSUAL="sum"` y `PERIODO_ESTACIONAL=7`. Usa `"mean"` para niveles.
-`CALENDARIO_AMPLIADO=True` permite declarar `FERIADOS`; incluye las fechas futuras.
-`PERIODOS_VALIDACION_SERIE` y `PERIODOS_PRUEBA_SERIE` sustituyen sus respectivas
-fracciones solo en series. Compara esas duraciones con `HORIZONTE`.
+La predicción usa el modelo en memoria. Solo el modelo seleccionado se reentrena: con train+validación para prueba y, después, con toda la historia para el uso operativo. En series, cambiar fechas de pronóstico no exige reentrenar el modelo operativo si ya ejecutaste su celda.
 
-Sin archivo futuro, `FECHA_FIN_PRONOSTICO` permite generar hasta una fecha de la frecuencia
-guardada. `FECHA_INICIO_REPORTE` y `FECHA_FIN_REPORTE` filtran después de pronosticar
-todos los pasos. Se exportan `predicciones_base_nueva.csv`, `pronostico_intervalo.csv`
-y, al activar la agregación mensual, `pronostico_mensual.csv`. El resumen indica cobertura
-y meses parciales; solo compara contra el año anterior cuando ambos meses están completos.
+## Salidas y anexos
 
-Verificación local: instala las dependencias de la primera celda y `nbformat`, y ejecuta
-`python tests/verificar_guia_pc2.py`. Las pruebas usan archivos sintéticos temporales y
-no modifican el notebook. Comprueban los tres recorridos, clasificación multiclase,
-persistencia, base estacional, calendario, recursión sin targets futuros, cobertura mensual,
-opciones de búsqueda/SHAP, exportación y errores de datos y esquema.
+En /content/salidas_guia_pc2 se generan, según el caso:
 
-Para comprobar solo cálculos y fechas con NumPy y pandas, ejecuta
-`python tests/verificar_series_pc2.py`. Esta prueba ligera omite gráficos y entrenamiento;
-no sustituye la verificación completa. Puedes elegir otra carpeta de dependencias para
-el verificador completo mediante la variable de entorno `PC2_VALIDATION_PACKAGES`.
+- predicciones_base_nueva.csv para una segunda base tabular sin necesidad de target.
+- pronostico_completo.csv, pronostico_intervalo.csv y pronostico_mensual.csv para series.
+
+El resumen mensual indica cobertura y meses parciales; usa sum para cantidades acumulables y mean para niveles. La comparación interanual requiere ambos meses completos y denominador distinto de cero.
+
+Al final se conservan clasificación, GridSearch/RandomizedSearch, backtesting, LazyPredict, FLAML, red neuronal, SHAP y guardado joblib. Están apagados y no instalan paquetes ni entrenan por defecto. Clasificación se activa seleccionando clasificacion en la configuración; los otros anexos tienen su propia bandera.
+
+Las referencias principales son RapiMenu, agentes/recaudación y el caso de series de [referencias/](referencias/). Se conserva su estilo de preparación, entrenamiento, comparación y predicción, corrigiendo selección sobre prueba y medias móviles que incluían el target actual. Las referencias no se modifican.
+
+## Verificación local (fuera del examen)
+
+- Ligera: NumPy, pandas y openpyxl; ejecuta python tests/verificar_series_pc2.py.
+- Completa: instala las librerías de la celda de instalación y nbformat; ejecuta python tests/verificar_guia_pc2.py.
+- PC2_VALIDATION_PACKAGES permite indicar otra carpeta de dependencias. Los verificadores no agregan paquetes automáticamente.
+
+Las pruebas usan archivos sintéticos temporales y no modifican el notebook. La prueba ligera cubre estructura, anexos apagados, lectura, fechas, recursión, cobertura mensual y selección. La completa ejecuta todos los algoritmos principales, gráficos, categorías nuevas, clasificación, búsquedas, backtesting y guardado/recarga. AutoML, red y SHAP permanecen apagados en esa verificación.
+
+El notebook se entrega sin datos propios ni resultados precalculados. La última celda registra qué verificaciones se ejecutaron realmente.
+
+**Estado de esta entrega:** pasó la verificación ligera. La completa no pudo iniciarse por falta de dependencias; su descarga fue rechazada. No se ejecutó Colab ni se midieron tiempos de entrenamiento.
