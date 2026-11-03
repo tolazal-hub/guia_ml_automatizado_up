@@ -9,7 +9,7 @@ import os
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-LOCAL_PACKAGES = ROOT / '.validation_packages'
+LOCAL_PACKAGES = Path(os.environ.get('PC2_VALIDATION_PACKAGES', ROOT / '.validation_packages'))
 if LOCAL_PACKAGES.is_dir():
     sys.path.insert(0, str(LOCAL_PACKAGES))
 os.environ['MPLBACKEND'] = 'Agg'
@@ -26,6 +26,7 @@ import warnings
 from unittest.mock import patch
 
 import nbformat
+from verificar_series_pc2 import check_temporal_functions
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -68,7 +69,16 @@ def check_structure():
                 assigned = {n.id for target in node.targets for n in ast.walk(target) if isinstance(n, ast.Name)}
                 referenced = {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)}
                 assert not assigned & referenced, (cell.id, 'Reasignación autorreferente', assigned & referenced)
-                assert all(isinstance(t, (ast.Name, ast.Tuple, ast.List)) for t in node.targets), (cell.id, 'Mutación de columna/atributo')
+                # Estado de adaptadores, registro de candidatos y opciones de TensorFlow;
+                # ninguna excepción permite modificar columnas de un DataFrame.
+                allowed_state = {
+                    ('flaml-adaptador', 'self._model'),
+                    ('flaml-busqueda', 'modelos_flaml_ajustados[familia_original]'),
+                    ('red-tabular', 'opciones_dataset_red.threading.private_threadpool_size'),
+                }
+                assert all(isinstance(t, (ast.Name, ast.Tuple, ast.List)) or (
+                    (cell.id, ast.unparse(t)) in allowed_state
+                ) for t in node.targets), (cell.id, 'Mutación de columna/atributo')
             if isinstance(node, ast.AugAssign):
                 raise AssertionError((cell.id, 'Asignación acumulativa'))
             if isinstance(node, ast.Call):
@@ -76,11 +86,17 @@ def check_structure():
             if isinstance(node, ast.FunctionDef):
                 definitions.append(node.name)
                 assert ast.get_docstring(node), node.name
-    assert len(definitions) == 6, definitions
+    required = {'aplicar_reglas', 'cambiar_tipos', 'limpiar_explicitamente',
+                'metricas_regresion', 'metricas_clasificacion', 'predecir_tabular',
+                'variables_calendario', 'construir_rezagos', 'pronostico_recursivo',
+                'resumir_mensual', 'errores_temporales'}
+    assert required.issubset(definitions), required - set(definitions)
     markdown = '\n'.join(c.source for c in NOTEBOOK.cells if c.cell_type == 'markdown')
-    for name in definitions:
-        assert f'`{name}(' in markdown, name
-    print(f'OK estructura: {len(NOTEBOOK.cells)} celdas, {len(definitions)} funciones documentadas', flush=True)
+    for name in required:
+        assert f'{name}(' in markdown, name
+    assert all(not c.get('outputs') and c.get('execution_count') is None
+               for c in NOTEBOOK.cells if c.cell_type == 'code')
+    print(f'OK estructura: {len(NOTEBOOK.cells)} celdas, funciones requeridas y docstrings', flush=True)
 
 
 def expect_error(identifier, namespace, exception, message):
@@ -92,7 +108,8 @@ def expect_error(identifier, namespace, exception, message):
         raise AssertionError(f'{identifier} no rechazó {message}')
 
 
-def run_case(folder, kind, classes=2, optional=False, positive_first=False, persistence=False):
+def run_case(folder, kind, classes=2, optional=False, positive_first=False, persistence=False,
+             seasonal=False, temporal_options=False):
     rng = np.random.default_rng(420 + classes)
     n = 240
     if kind == 'serie_tiempo':
@@ -102,6 +119,11 @@ def run_case(folder, kind, classes=2, optional=False, positive_first=False, pers
         new_data = pd.DataFrame({'fecha': future_dates, 'valor': [50., 51., 53., 55., 57.]})
         config = {'TIPO_PROBLEMA': kind, 'TARGET': 'valor', 'FECHA': 'fecha', 'HORIZONTE': 5,
                   'VENTANAS_BACKTEST': 2, 'PASO_BACKTEST': 5, 'REZAGOS': [1, 7], 'VENTANAS': [3]}
+        if temporal_options or seasonal:
+            config.update(CALENDARIO_AMPLIADO=True, FERIADOS=['2025-01-01', '2025-08-29'],
+                          PERIODO_ESTACIONAL=7, PERIODOS_VALIDACION_SERIE=5,
+                          PERIODOS_PRUEBA_SERIE=5, VENTANA_MEDIA_EDA=7,
+                          AGREGACION_MENSUAL='sum')
     else:
         numbers = rng.normal(size=n)
         source = pd.DataFrame({'cliente_id': np.arange(n), 'cantidad': numbers,
@@ -120,7 +142,7 @@ def run_case(folder, kind, classes=2, optional=False, positive_first=False, pers
             'IMPUTAR_NUMERICAS': True, 'IMPUTAR_CATEGORICAS': True,
             'CLASE_POSITIVA': 'Abandona' if positive_first else 'Permanece',
             'REGLAS_TEXTOS': []}
-    name = f'{kind}_{classes}_{"optional" if optional else "base"}_{"persist" if persistence else "model"}'
+    name = f'{kind}_{classes}_{"optional" if optional else "base"}_{"seasonal" if seasonal else "persist" if persistence else "model"}_{temporal_options}'
     source_path = folder / f'{name}.csv'
     new_path = folder / f'{name}_new.xlsx'
     source.to_csv(source_path, index=False)
@@ -137,7 +159,7 @@ def run_case(folder, kind, classes=2, optional=False, positive_first=False, pers
         'importancia-opcional': {'EJECUTAR_IMPORTANCIA': optional},
         'shap-opcional': {'EJECUTAR_SHAP': optional, 'FILAS_FONDO_SHAP': 8, 'FILAS_EXPLICAR_SHAP': 2,
             'CLASE_SHAP': 'Abandona' if positive_first else 'Permanece'},
-        'backtesting': {'MODELO_TEMPORAL_ELEGIDO': 'Persistencia' if persistence else 'Random Forest'},
+        'backtesting': {'MODELO_TEMPORAL_ELEGIDO': 'Estacional' if seasonal else 'Persistencia' if persistence else 'Random Forest'},
     }
     namespace = {'__name__': '__main__'}
     captured = io.StringIO()
@@ -211,7 +233,7 @@ def run_case(folder, kind, classes=2, optional=False, positive_first=False, pers
                 original_train = namespace['df_train_limpio']
                 namespace['df_train_limpio'] = original_train.iloc[:0]
                 # La partición inicial también rechaza un target nulo, antes de entrenar.
-                namespace['df_reglas'] = namespace['df_reglas'].assign(objetivo=np.nan)
+                namespace['df_limpio'] = namespace['df_limpio'].assign(objetivo=np.nan)
                 expect_error('validacion-configuracion', namespace, ValueError, 'targets nulos')
         else:
             history = namespace['historia_train']
@@ -229,7 +251,7 @@ def run_case(folder, kind, classes=2, optional=False, positive_first=False, pers
                 (source.drop(index=40), False, 'huecos'),
                 (pd.concat([source, source.iloc[[10]]]).sort_values('fecha'), True, 'varias filas'),
             ]:
-                namespace['df_reglas'] = bad_source
+                namespace['df_limpio'] = bad_source
                 namespace['PERMITIR_ORDENAR_FECHAS'] = allowed_order
                 expect_error('reserva-temporal', namespace, ValueError, expected)
             # La ruta temporal predeterminada también permite fechas futuras sin otro archivo.
@@ -238,6 +260,7 @@ def run_case(folder, kind, classes=2, optional=False, positive_first=False, pers
             execute_cell('validar-nuevos', namespace)
             execute_cell('predecir-nuevos', namespace)
             assert len(namespace['resultado_base_nueva']) == config['HORIZONTE']
+            check_temporal_case(namespace, source, new_data, output, temporal_options or seasonal)
 
         # Funciones sin efectos laterales y métricas en presencia de ceros.
         input_clean = pd.DataFrame({'a': [1, 1, 2], 'b': [' x ', ' x ', ' y ']})
@@ -252,8 +275,58 @@ def run_case(folder, kind, classes=2, optional=False, positive_first=False, pers
     return namespace
 
 
+def check_temporal_case(namespace, source, new_data, output, enhanced):
+    """Verifica el recorrido temporal real, incluyendo recarga y reportes."""
+    history = namespace['paquete_modelo_cargado']['historia']
+    config = namespace['configuracion_cargada']
+    before = namespace['resultado_base_nueva']['ml_prediccion'].copy()
+    # Cambiar los targets del archivo futuro no puede cambiar las predicciones.
+    namespace['df_nueva_original'] = new_data.assign(valor=-999999.)
+    execute_cell('validar-nuevos', namespace)
+    execute_cell('predecir-nuevos', namespace)
+    np.testing.assert_allclose(namespace['resultado_base_nueva']['ml_prediccion'], before)
+    unpersisted = namespace['pronostico_recursivo'](
+        namespace['paquete_modelo']['modelo'], history, namespace['fechas_futuras_esperadas'],
+        config['rezagos'], config['ventanas'], config['feriados'], config['calendario_ampliado'],
+        config['periodo_estacional'] if namespace['paquete_modelo']['nombre_modelo'] == 'Estacional' else None)
+    np.testing.assert_allclose(unpersisted, namespace['predicciones_futuras_nuevas'])
+    assert namespace['error_por_paso_temporal'].index.get_level_values('paso').max() == config['horizonte']
+    assert (output / 'pronostico_intervalo.csv').is_file()
+    if enhanced:
+        assert len(namespace['df_reserva_validacion']) == 5
+        assert len(namespace['df_reserva_prueba']) == 5
+        assert 'Estacional' in namespace['tabla_backtest']['Modelo'].unique()
+        assert {'semana_iso', 'fin_de_semana', 'es_feriado'} <= set(namespace['X_train_temporal'].columns)
+        assert (output / 'pronostico_mensual.csv').is_file()
+
+    # Horizonte completo hasta fecha final; el reporte comienza después del origen.
+    namespace['USAR_ARCHIVO_FUTURO'] = False
+    end = history.index[-1] + pd.offsets.Day(70)
+    namespace['FECHA_FIN_PRONOSTICO'] = end.strftime('%Y-%m-%d')
+    namespace['FECHA_INICIO_REPORTE'] = (history.index[-1] + pd.offsets.Day(4)).strftime('%Y-%m-%d')
+    namespace['FECHA_FIN_REPORTE'] = (history.index[-1] + pd.offsets.Day(8)).strftime('%Y-%m-%d')
+    execute_cell('recargar-y-leer-nuevos', namespace)
+    execute_cell('validar-nuevos', namespace)
+    execute_cell('predecir-nuevos', namespace)
+    execute_cell('reportes-temporales', namespace)
+    assert len(namespace['resultado_base_nueva']) == 70
+    assert len(namespace['resultado_intervalo']) == 5
+    np.testing.assert_allclose(namespace['resultado_intervalo']['ml_prediccion'],
+                               namespace['resultado_base_nueva']['ml_prediccion'].iloc[3:8])
+    namespace['FECHA_FIN_REPORTE'] = (end + pd.offsets.Day()).strftime('%Y-%m-%d')
+    expect_error('reportes-temporales', namespace, ValueError, 'dentro del horizonte')
+    namespace['FECHA_FIN_PRONOSTICO'] = history.index[-1].strftime('%Y-%m-%d')
+    expect_error('recargar-y-leer-nuevos', namespace, ValueError, 'posterior al origen')
+    namespace['FECHA_FIN_PRONOSTICO'] = None
+    namespace['FECHA_INICIO_REPORTE'] = None
+    namespace['FECHA_FIN_REPORTE'] = None
+
+
+
+
 if __name__ == '__main__':
     check_structure()
+    check_temporal_functions()
     with tempfile.TemporaryDirectory(prefix='guia_pc2_') as temporary:
         folder = Path(temporary)
         run_case(folder, 'clasificacion', classes=2, optional=True, positive_first=True)
@@ -261,4 +334,6 @@ if __name__ == '__main__':
         run_case(folder, 'regresion', optional=True)
         run_case(folder, 'serie_tiempo', optional=True)
         run_case(folder, 'serie_tiempo', persistence=True)
+        run_case(folder, 'serie_tiempo', temporal_options=True)
+        run_case(folder, 'serie_tiempo', seasonal=True, optional=True)
     print('Todas las verificaciones finalizaron correctamente.', flush=True)
